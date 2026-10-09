@@ -22,14 +22,19 @@ export interface RecordResult {
   created: boolean;
 }
 
-/** The idempotency key was already used for a payment instruction with different details. */
-export class IdempotencyKeyReuseError extends Error {
+/**
+ * The idempotency key was already used for a payment instruction with different details.
+ * Returning the existing instruction would hide the caller's mistake, so this is an error.
+ */
+export class IdempotencyConflictError extends Error {
   readonly idempotencyKey: string;
+  readonly existing: PaymentInstruction;
 
-  constructor(idempotencyKey: string) {
+  constructor(idempotencyKey: string, existing: PaymentInstruction) {
     super(`Idempotency key "${idempotencyKey}" was already used with different payment details`);
-    this.name = 'IdempotencyKeyReuseError';
+    this.name = 'IdempotencyConflictError';
     this.idempotencyKey = idempotencyKey;
+    this.existing = existing;
   }
 }
 
@@ -46,6 +51,10 @@ const COLUMNS = 'id, idempotency_key, amount_minor, currency, recipient, created
 
 /**
  * Records a payment instruction at most once per idempotency key.
+ *
+ * - new key                          -> inserts and returns it (created: true)
+ * - same key, same payment details   -> returns the existing instruction (created: false)
+ * - same key, different details      -> throws IdempotencyConflictError
  *
  * Uniqueness is enforced by the UNIQUE constraint on payment_instructions.idempotency_key,
  * so this is safe across concurrent connections and processes. Run it in autocommit mode
@@ -82,14 +91,19 @@ export async function recordPaymentInstruction(
   }
 
   const instruction = toInstruction(existingRow);
-  if (
-    instruction.amountMinor !== amountMinor ||
-    instruction.currency !== currency ||
-    instruction.recipient !== recipient
-  ) {
-    throw new IdempotencyKeyReuseError(idempotencyKey);
+  if (!samePaymentDetails(instruction, input)) {
+    throw new IdempotencyConflictError(idempotencyKey, instruction);
   }
   return { instruction, created: false };
+}
+
+/** The fields that define a payment instruction; all must match for a request to count as a retry. */
+function samePaymentDetails(existing: PaymentInstruction, input: PaymentInstructionInput): boolean {
+  return (
+    existing.amountMinor === input.amountMinor &&
+    existing.currency === input.currency &&
+    existing.recipient === input.recipient
+  );
 }
 
 function toInstruction(row: Row): PaymentInstruction {
