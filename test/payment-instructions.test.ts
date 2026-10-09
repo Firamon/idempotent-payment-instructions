@@ -9,6 +9,16 @@ import {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** A row as stored, read independently of the code under test (int8 arrives as a string). */
+interface StoredRow {
+  id: string;
+  idempotency_key: string;
+  amount_minor: string;
+  currency: string;
+  recipient: string;
+  created_at: Date;
+}
+
 const payment: PaymentInstructionInput = {
   idempotencyKey: 'payment-123',
   amountMinor: 10_000n,
@@ -34,8 +44,8 @@ describe('recordPaymentInstruction (real PostgreSQL)', () => {
     return rows[0]!.pid;
   }
 
-  async function rowsFor(idempotencyKey: string) {
-    const { rows } = await pool.query(
+  async function rowsFor(idempotencyKey: string): Promise<StoredRow[]> {
+    const { rows } = await pool.query<StoredRow>(
       'SELECT * FROM payment_instructions WHERE idempotency_key = $1',
       [idempotencyKey],
     );
@@ -88,7 +98,7 @@ describe('recordPaymentInstruction (real PostgreSQL)', () => {
     const { instruction } = await recordPaymentInstruction(pool, { ...payment, amountMinor });
 
     expect(instruction.amountMinor).toBe(amountMinor);
-    expect((await rowsFor('payment-123'))[0].amount_minor).toBe('9007199254740993');
+    expect((await rowsFor('payment-123'))[0]?.amount_minor).toBe('9007199254740993');
   });
 
   it('returns the existing instruction when the same request is retried sequentially', async () => {
@@ -127,13 +137,12 @@ describe('recordPaymentInstruction (real PostgreSQL)', () => {
     await connA.query('BEGIN');
     const a = await recordPaymentInstruction(connA, payment); // row inserted, still uncommitted
 
-    const b = recordPaymentInstruction(connB, payment); // must block on A's uncommitted key
+    const [bResult] = await Promise.all([
+      recordPaymentInstruction(connB, payment), // must block on A's uncommitted key
+      // Commit A only once PostgreSQL itself reports that B is blocked by A.
+      waitUntilBlocked(pidB, pidA).then(() => connA.query('COMMIT')),
+    ]);
 
-    // Proceed only once PostgreSQL itself reports that B is blocked by A.
-    await waitUntilBlocked(pidB, pidA);
-    await connA.query('COMMIT');
-
-    const bResult = await b;
     expect(a.created).toBe(true);
     expect(bResult.created).toBe(false);
     expect(bResult.instruction).toEqual(a.instruction);
@@ -174,18 +183,23 @@ describe('recordPaymentInstruction (real PostgreSQL)', () => {
 
     expect(second.created).toBe(true);
     expect(second.instruction.id).not.toBe(first.instruction.id);
-    const { rows } = await pool.query('SELECT count(*)::int AS n FROM payment_instructions');
-    expect(rows[0].n).toBe(2);
+    const { rows } = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM payment_instructions');
+    expect(rows[0]?.n).toBe(2);
   });
 
-  /** Polls PostgreSQL's lock graph until `waitingPid` is blocked by `blockingPid`. */
+  /**
+   * Polls PostgreSQL's lock graph until `waitingPid` is blocked by `blockingPid`.
+   * The deadline only turns a regression (B never blocks) into a clear failure instead of a hang.
+   */
   async function waitUntilBlocked(waitingPid: number, blockingPid: number): Promise<void> {
-    for (;;) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
       const { rows } = await pool.query<{ blocked: boolean }>(
         'SELECT $2::int = ANY (pg_blocking_pids($1)) AS blocked',
         [waitingPid, blockingPid],
       );
       if (rows[0]!.blocked) return;
     }
+    throw new Error(`backend ${waitingPid} was never blocked by backend ${blockingPid}`);
   }
 });

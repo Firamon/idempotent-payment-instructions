@@ -5,7 +5,7 @@
   "description": "Records payment instructions in Postgres so that a retried request can never create one twice.",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.2"
   },
   "scripts": {
     "db:up": "docker compose up -d --wait",

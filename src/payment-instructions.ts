@@ -80,7 +80,8 @@ export async function recordPaymentInstruction(
     return { instruction: toInstruction(insertedRow), created: true };
   }
 
-  // Conflict: the winning row is committed. A new statement takes a new snapshot, so it sees it.
+  // Conflict: the existing row is committed (ON CONFLICT waited for it), or was written earlier in
+  // this same transaction. Under READ COMMITTED this new statement takes a new snapshot, so it sees it.
   const existing = await db.query<Row>(
     `SELECT ${COLUMNS} FROM payment_instructions WHERE idempotency_key = $1`,
     [idempotencyKey],
