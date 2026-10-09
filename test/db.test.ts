@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPool } from '../src/db.ts';
 
-// Smoke test for the scaffold: proves the suite reaches a real Postgres and migrations ran.
+// Smoke test: proves the suite reaches a real Postgres and migrations ran.
 describe('database connectivity', () => {
   let pool: pg.Pool;
 
@@ -24,5 +24,12 @@ describe('database connectivity', () => {
       "SELECT to_regclass('public.schema_migrations')::text AS table",
     );
     expect(rows[0]?.table).toBe('schema_migrations');
+  });
+
+  it('has applied the payment_instructions migration', async () => {
+    const { rows } = await pool.query<{ table: string | null }>(
+      "SELECT to_regclass('public.payment_instructions')::text AS table",
+    );
+    expect(rows[0]?.table).toBe('payment_instructions');
   });
 });
